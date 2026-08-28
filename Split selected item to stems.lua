@@ -501,8 +501,19 @@ local function load_tempo_map_lib()
   if type(Bryan_ApplyDrumStemTempoMap) == "function" then
     return true
   end
-  local path = join_path(script_dir(), "Tempo map from drum stem.lua")
-  if not file_exists(path) then
+  local dir = script_dir()
+  local path
+  for _, name in ipairs({
+    "Tempo map from drum stem.lua",
+    "CRS_Tempo map from drum stem.lua",
+  }) do
+    local candidate = join_path(dir, name)
+    if file_exists(candidate) then
+      path = candidate
+      break
+    end
+  end
+  if not path then
     return false, "Tempo map from drum stem.lua not found next to this script."
   end
   Bryan_DrumStemTempoMap_AsLib = true
