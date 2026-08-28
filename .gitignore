@@ -1,0 +1,4 @@
+.DS_Store
+.venv-stems/
+__pycache__/
+*.pyc

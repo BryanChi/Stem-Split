@@ -1,0 +1,3 @@
+demucs-mlx[convert]
+mdxnet-infer
+soundfile
