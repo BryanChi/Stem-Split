@@ -761,6 +761,8 @@ local function main()
     gfx_on = gfx_on,
     warnings = {},
   }
+  -- frame timing for the Performance Tracker window (no cost while it is closed)
+  pcall(function() poll = dofile(join_path(script_dir(), "CRS_Perf.lua")).Wrap("Stem Split", poll) end)
   r.defer(poll)
 end
 
