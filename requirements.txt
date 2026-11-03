@@ -1,3 +1,4 @@
-mlx-audio-separator[convert]
+mlx-audio-separator
+torch>=2.6
 mdxnet-infer
 soundfile

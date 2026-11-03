@@ -708,7 +708,7 @@ local function main()
       "Python environment not found:\n" .. py .. "\n\n"
         .. "Create it with:\n"
         .. "  python3.13 -m venv .venv-stems\n"
-        .. "  .venv-stems/bin/pip install 'mlx-audio-separator[convert]' mdxnet-infer soundfile",
+        .. "  .venv-stems/bin/pip install mlx-audio-separator 'torch>=2.6' mdxnet-infer soundfile",
       "Split to stems",
       0
     )

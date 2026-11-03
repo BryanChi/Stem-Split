@@ -102,6 +102,67 @@ def ordered_stems(stems: dict, count: int) -> list[tuple[str, object]]:
     return out
 
 
+def looks_like_drum_loop(wav, samplerate: int) -> bool:
+    """Cheap percussive-vs-mix check so drum loops can skip mix separation.
+
+    Conservative: a full mix must not be classified as drums-only.
+    """
+    import numpy as np
+
+    audio = np.asarray(wav)
+    if audio.ndim == 2:
+        if audio.shape[0] <= 8 and audio.shape[1] > audio.shape[0]:
+            audio = np.mean(audio, axis=0)
+        else:
+            audio = np.mean(audio, axis=-1 if audio.shape[-1] <= 8 else 0)
+    audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+    n = int(audio.shape[0])
+    sr = int(samplerate) or 44100
+    if n < int(sr * 0.35):
+        return False
+    dur = n / float(sr)
+    peak = float(np.max(np.abs(audio)) + 1e-9)
+    rms = float(np.sqrt(np.mean(audio * audio)) + 1e-9)
+    crest = peak / rms
+    hop = max(128, int(sr * 0.012))
+    win = hop * 2
+    window = np.hanning(win).astype(np.float32)
+    prev = None
+    fluxes = []
+    hf_ratios = []
+    mid_stable = []
+    prev_mid = None
+    freqs = np.fft.rfftfreq(win, 1.0 / sr)
+    hf_idx = freqs > 4500.0
+    mid_idx = (freqs > 180.0) & (freqs < 1800.0)
+    for i in range(0, n - win, hop):
+        frame = audio[i : i + win] * window
+        mag = np.abs(np.fft.rfft(frame))
+        total = float(np.sum(mag) + 1e-9)
+        hf_ratios.append(float(np.sum(mag[hf_idx])) / total)
+        mid = float(np.sum(mag[mid_idx])) / total
+        if prev is not None:
+            fluxes.append(float(np.mean(np.maximum(mag - prev, 0.0))))
+        if prev_mid is not None:
+            mid_stable.append(abs(mid - prev_mid))
+        prev = mag
+        prev_mid = mid
+    if not fluxes:
+        return False
+    flux_norm = float(np.median(fluxes)) / (rms + 1e-9)
+    hf_med = float(np.median(hf_ratios)) if hf_ratios else 0.0
+    mid_delta = float(np.median(mid_stable)) if mid_stable else 0.0
+    if dur > 90.0 and crest < 10.0:
+        return False
+    if dur > 45.0 and flux_norm < 0.35:
+        return False
+    drumish = crest >= 7.5 and flux_norm >= 0.18
+    drumish = drumish or (crest >= 5.8 and flux_norm >= 0.28 and hf_med >= 0.08)
+    if drumish and mid_delta < 0.008 and crest < 9.0 and dur > 20.0:
+        return False
+    return bool(drumish)
+
+
 def split_drums(drums_wav, samplerate: int, out_dir: Path, progress_file: str | None) -> dict[str, str]:
     import numpy as np
     from mdxnet_infer import MDX23CInference
@@ -153,13 +214,11 @@ def stem_key(path: str) -> str:
     return {"instrumental": "other", "no vocals": "other"}.get(key, key)
 
 
-def separate_roformer(args: argparse.Namespace, count: int, out_dir: Path):
+def separate_roformer(wav, sr: int, count: int, out_dir: Path, progress_file: str | None):
     import numpy as np
     import soundfile as sf
     from mlx_audio_separator import Separator
 
-    write_progress(args.progress_file, 6, "Loading audio…")
-    wav, sr = load_slice(args.input, args.start, args.duration, SAMPLERATE)
     mix = np.asarray(wav, dtype=np.float32)
     if mix.shape[0] == 1:
         mix = np.concatenate([mix, mix], axis=0)
@@ -172,10 +231,10 @@ def separate_roformer(args: argparse.Namespace, count: int, out_dir: Path):
     try:
         src = work / "mix.wav"
         sf.write(str(src), (mix * gain).T, sr, subtype="FLOAT")
-        write_progress(args.progress_file, 12, "Loading BS-RoFormer SW (first run downloads weights)…")
+        write_progress(progress_file, 12, "Loading BS-RoFormer SW (first run downloads weights)…")
         separator = Separator(output_dir=str(work), output_format="WAV", normalization_threshold=1.0)
         separator.load_model(model_filename=ROFORMER_CKPT)
-        write_progress(args.progress_file, 28, "Separating stems on Apple GPU (BS-RoFormer SW)…")
+        write_progress(progress_file, 28, "Separating stems on Apple GPU (BS-RoFormer SW)…")
         outputs = separator.separate(str(src))
         stems = {}
         for out in outputs or []:
@@ -207,37 +266,66 @@ def run(args: argparse.Namespace) -> dict:
     out_dir = Path(args.output_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    stems, sr = separate_roformer(args, count, out_dir)
-
-    write_progress(args.progress_file, 62, "Writing stem files…")
-    stem_paths: dict[str, str] = {}
-    for name, audio in ordered_stems(stems, count):
-        dest = out_dir / f"{name}.wav"
-        save_wav(audio, dest, sr)
-        stem_paths[name] = str(dest)
+    write_progress(args.progress_file, 6, "Loading audio…")
+    wav, sr = load_slice(args.input, args.start, args.duration, SAMPLERATE)
+    skip_mix = bool(args.drums_only)
+    detect_note = ""
+    if args.auto_skip_mix and not skip_mix:
+        write_progress(args.progress_file, 10, "Checking if this is already a drum loop…")
+        try:
+            skip_mix = looks_like_drum_loop(wav, sr)
+        except Exception:
+            skip_mix = False
+        detect_note = "drum loop" if skip_mix else "full mix"
 
     warning = ""
+    stem_paths: dict[str, str] = {}
     drum_paths: dict[str, str] = {}
-    if args.split_drums:
-        drums = stems.get("drums")
-        if drums is None:
-            warning = "No drums stem to split."
-        else:
+    engine = ENGINE
+
+    if skip_mix:
+        engine = "drums-only"
+        write_progress(args.progress_file, 18, "Drum loop — skipping mix split…")
+        drums_dest = out_dir / "drums.wav"
+        save_wav(wav, drums_dest, sr)
+        stem_paths["drums"] = str(drums_dest)
+        if args.split_drums:
             try:
-                drum_paths = split_drums(drums, sr, out_dir, args.progress_file)
+                drum_paths = split_drums(wav, sr, out_dir, args.progress_file)
             except Exception as exc:
                 warning = f"Drum split failed: {exc}"
+        if detect_note == "drum loop" and not warning:
+            warning = "Skipped mix split (already a drum loop)."
+    else:
+        stems, sr = separate_roformer(wav, sr, count, out_dir, args.progress_file)
+
+        write_progress(args.progress_file, 62, "Writing stem files…")
+        for name, audio in ordered_stems(stems, count):
+            dest = out_dir / f"{name}.wav"
+            save_wav(audio, dest, sr)
+            stem_paths[name] = str(dest)
+
+        if args.split_drums:
+            drums = stems.get("drums")
+            if drums is None:
+                warning = "No drums stem to split."
+            else:
+                try:
+                    drum_paths = split_drums(drums, sr, out_dir, args.progress_file)
+                except Exception as exc:
+                    warning = f"Drum split failed: {exc}"
 
     write_progress(args.progress_file, 100, "Done")
     return {
         "ok": True,
-        "engine": ENGINE,
+        "engine": engine,
         "model": model,
         "samplerate": sr,
         "warning": warning,
         "stems": stem_paths,
         "drum_stems": drum_paths,
         "output_dir": str(out_dir),
+        "skipped_mix": skip_mix,
     }
 
 
@@ -248,6 +336,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--stems", default="", help="4 (vocals/drums/bass/other) or 6 (adds guitar + piano)")
     p.add_argument("--model", default="", help="Deprecated: old model name, mapped to --stems")
     p.add_argument("--split-drums", action="store_true", help="Also split drums into kit pieces")
+    p.add_argument("--drums-only", action="store_true", help="Skip mix separation; treat the input as drums")
+    p.add_argument("--auto-skip-mix", action="store_true", help="Skip mix separation when the audio looks like a drum loop")
     p.add_argument("--start", type=float, default=0.0, help="Start offset in source seconds")
     p.add_argument("--duration", type=float, default=0.0, help="Duration in source seconds (0 = rest of file)")
     p.add_argument("--progress-file", default="", help="Two-line percent/message file")
