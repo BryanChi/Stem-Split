@@ -2,9 +2,11 @@
 
 REAPER script that splits the selected audio item into vocals / drums / bass / other using BS-RoFormer SW on Apple Silicon (MLX). Optional 6-stem (guitar + piano), drum-kit split, and tempo map from the drums stem.
 
+The action opens one window for everything: the selected items, the input (Auto detects drum loops, Full mix, Drum loop), 4 or 6 stems, the drum-kit split, mute original and tempo map, then a progress bar per item with Cancel, and the stems each item got.
+
 ## Requirements
 
-- [REAPER](https://www.reaper.fm/)
+- [REAPER](https://www.reaper.fm/) with [ReaImGui](https://github.com/cfillion/reaimgui) (ReaPack)
 - macOS on Apple Silicon (MLX)
 - Python 3.13
 - A local virtualenv next to these files named `.venv-stems`
