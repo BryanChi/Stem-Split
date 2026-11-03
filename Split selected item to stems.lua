@@ -1,9 +1,9 @@
--- @description Split selected item to stems (Demucs-MLX)
--- @version 1.1
+-- @description Split selected item to stems (BS-RoFormer / Demucs-MLX)
+-- @version 1.2
 -- @author BRYAN
 -- @about
 --   Splits the selected audio item into vocals / drums / bass / other using
---   Demucs-MLX on Apple Silicon. Optional 6-stem (guitar + piano), drum
+--   BS-RoFormer SW (default) or Demucs-MLX on Apple Silicon. Optional 6-stem (guitar + piano), drum
 --   kit split, and tempo map from the drums stem. Requires .venv-stems
 --   next to this script.
 -- @provides [main] .
@@ -381,14 +381,15 @@ local function collect_jobs()
 end
 
 local function ask_options()
-  local model = ext_get("MODEL", "fast")
+  -- MODEL_V2: older saves defaulted to the metallic-sounding "fast"
+  local model = ext_get("MODEL_V2", "best")
   local drums = ext_get("SPLIT_DRUMS", "n")
   local mute = ext_get("MUTE_ORIGINAL", "y")
   local tempo = ext_get("TEMPO_MAP", "n")
   local ok, csv = r.GetUserInputs(
     "Split to stems",
     4,
-    "Model (fast / good / 6stem),Split drums into kit (y/n),Mute original item (y/n),Tempo map from drums (y/n)",
+    "Model (best / 6stem / good / fast),Split drums into kit (y/n),Mute original item (y/n),Tempo map from drums (y/n)",
     table.concat({model, drums, mute, tempo}, ",")
   )
   if not ok then
@@ -403,10 +404,12 @@ local function ask_options()
     return nil
   end
   a = a:gsub("^%s+", ""):gsub("%s+$", ""):lower()
-  if a ~= "fast" and a ~= "good" and a ~= "6stem" and a ~= "htdemucs" and a ~= "htdemucs_ft" and a ~= "htdemucs_6s" then
-    a = "fast"
+  local known = { fast = 1, good = 1, best = 1, ["6stem"] = 1, roformer = 1, roformer_6s = 1,
+    htdemucs = 1, htdemucs_ft = 1, htdemucs_6s = 1 }
+  if not known[a] then
+    a = "best"
   end
-  ext_set("MODEL", a)
+  ext_set("MODEL_V2", a)
   ext_set("SPLIT_DRUMS", yn(b, false) and "y" or "n")
   ext_set("MUTE_ORIGINAL", yn(c, true) and "y" or "n")
   ext_set("TEMPO_MAP", yn(d, false) and "y" or "n")
@@ -699,7 +702,7 @@ local function main()
     return
   end
   if r.GetOS():match("Win") then
-    r.MB("This script currently uses Demucs-MLX and is Mac / Apple Silicon only.", "Split to stems", 0)
+    r.MB("This script uses MLX (BS-RoFormer / Demucs) and is Mac / Apple Silicon only.", "Split to stems", 0)
     return
   end
 

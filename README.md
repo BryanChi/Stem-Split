@@ -1,6 +1,6 @@
 # Stem Split
 
-REAPER script that splits the selected audio item into vocals / drums / bass / other using Demucs-MLX on Apple Silicon. Optional 6-stem (guitar + piano), drum-kit split, and tempo map from the drums stem.
+REAPER script that splits the selected audio item into vocals / drums / bass / other using BS-RoFormer SW (default, cleanest) or Demucs-MLX (fast) on Apple Silicon. Optional 6-stem (guitar + piano), drum-kit split, and tempo map from the drums stem.
 
 ## Requirements
 

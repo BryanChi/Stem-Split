@@ -1,22 +1,33 @@
 #!/usr/bin/env python3
-"""REAPER sidecar: split a mix into stems with Demucs-MLX, optionally drums into kit pieces."""
+"""REAPER sidecar: split a mix into stems with BS-RoFormer SW (MLX) or Demucs-MLX,
+optionally drums into kit pieces."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
+import shutil
 import sys
+import tempfile
 import traceback
 from pathlib import Path
 
 
+# BS-RoFormer SW: ~3 dB cleaner than htdemucs on every stem, far less metallic.
+ROFORMER_4 = "roformer"
+ROFORMER_6 = "roformer_6s"
+ROFORMER_CKPT = "BS-Roformer-SW.ckpt"
+
 MODEL_ALIASES = {
     "fast": "htdemucs",
     "good": "htdemucs_ft",
-    "best": "htdemucs_ft",
-    "6stem": "htdemucs_6s",
-    "6s": "htdemucs_6s",
+    "best": ROFORMER_4,
+    "6stem": ROFORMER_6,
+    "6s": ROFORMER_6,
+    "roformer": ROFORMER_4,
+    "roformer_6s": ROFORMER_6,
     "htdemucs": "htdemucs",
     "htdemucs_ft": "htdemucs_ft",
     "htdemucs_6s": "htdemucs_6s",
@@ -59,6 +70,10 @@ def resolve_model(name: str) -> str:
     return MODEL_ALIASES[key]
 
 
+# Extra shifted passes average out Demucs' mask flicker (the "metallic" residue).
+DEMUCS_SHIFTS = {"htdemucs": 1, "htdemucs_ft": 2, "htdemucs_6s": 2}
+
+
 def load_slice(path: str, start: float, duration: float, samplerate: int):
     import mlx.core as mx
     import mlx_audio_io as mac
@@ -83,14 +98,19 @@ def load_slice(path: str, start: float, duration: float, samplerate: int):
 
 
 def save_wav(wav, path: Path, samplerate: int) -> None:
-    from demucs_mlx import save_audio
+    import numpy as np
+    import soundfile as sf
 
+    # 32-bit float, no per-stem rescale: stems keep their level and sum back to the mix
+    audio = np.asarray(wav, dtype=np.float32)
+    if audio.ndim == 1:
+        audio = audio[None, :]
     path.parent.mkdir(parents=True, exist_ok=True)
-    save_audio(wav, str(path), samplerate=samplerate, clip="rescale", bits_per_sample=16)
+    sf.write(str(path), audio.T, int(samplerate), subtype="FLOAT")
 
 
 def ordered_stems(stems: dict, model: str) -> list[tuple[str, object]]:
-    order = STEM_ORDER_6 if model == "htdemucs_6s" else STEM_ORDER_4
+    order = STEM_ORDER_6 if model in ("htdemucs_6s", ROFORMER_6) else STEM_ORDER_4
     out = []
     seen = set()
     for name in order:
@@ -146,21 +166,78 @@ def write_manifest(path: Path, payload: dict) -> None:
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def stem_key(path: str) -> str:
+    """'mix_(Vocals)_BS-Roformer-SW.wav' -> 'vocals'."""
+    name = Path(path).name
+    m = re.search(r"\(([^)]+)\)", name)
+    key = (m.group(1) if m else Path(path).stem).strip().lower()
+    return {"instrumental": "other", "no vocals": "other"}.get(key, key)
+
+
+def separate_roformer(args: argparse.Namespace, model: str, out_dir: Path):
+    import numpy as np
+    import soundfile as sf
+    from mlx_audio_separator import Separator
+
+    write_progress(args.progress_file, 6, "Loading audio…")
+    wav, sr = load_slice(args.input, args.start, args.duration, 44100)
+    mix = np.asarray(wav, dtype=np.float32)
+    if mix.shape[0] == 1:
+        mix = np.concatenate([mix, mix], axis=0)
+
+    work = Path(tempfile.mkdtemp(prefix="roformer_", dir=str(out_dir)))
+    try:
+        src = work / "mix.wav"
+        sf.write(str(src), mix.T, sr, subtype="FLOAT")
+        write_progress(args.progress_file, 12, "Loading BS-RoFormer SW (first run downloads weights)…")
+        separator = Separator(output_dir=str(work), output_format="WAV")
+        separator.load_model(model_filename=ROFORMER_CKPT)
+        write_progress(args.progress_file, 28, "Separating stems on Apple GPU (BS-RoFormer SW)…")
+        outputs = separator.separate(str(src))
+        stems = {}
+        for out in outputs or []:
+            out_path = Path(out)
+            if not out_path.is_absolute():
+                out_path = work / out_path
+            data, _ = sf.read(str(out_path), dtype="float32", always_2d=True)
+            stems[stem_key(str(out_path))] = data.T
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    if not stems:
+        raise RuntimeError("BS-RoFormer SW produced no stems.")
+
+    if model == ROFORMER_4:
+        # fold guitar + piano back into "other" for the 4-stem layout
+        extra = [stems.pop(k) for k in ("guitar", "piano") if k in stems]
+        if extra:
+            n = min(a.shape[-1] for a in extra + ([stems["other"]] if "other" in stems else []))
+            other = stems["other"][..., :n] if "other" in stems else 0
+            for a in extra:
+                other = other + a[..., :n]
+            stems["other"] = other
+    return stems, sr
+
+
 def run(args: argparse.Namespace) -> dict:
     model = resolve_model(args.model)
     out_dir = Path(args.output_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    write_progress(args.progress_file, 4, f"Loading {model}…")
-    from demucs_mlx import Separator
+    if model in (ROFORMER_4, ROFORMER_6):
+        engine = "mlx-audio-separator"
+        stems, sr = separate_roformer(args, model, out_dir)
+    else:
+        engine = "demucs-mlx"
+        write_progress(args.progress_file, 4, f"Loading {model}…")
+        from demucs_mlx import Separator
 
-    separator = Separator(model=model, progress=True, seed=0)
-    write_progress(args.progress_file, 18, "Loading audio…")
-    wav, sr = load_slice(args.input, args.start, args.duration, separator.samplerate)
+        separator = Separator(model=model, shifts=DEMUCS_SHIFTS.get(model, 1), progress=True, seed=0)
+        write_progress(args.progress_file, 18, "Loading audio…")
+        wav, sr = load_slice(args.input, args.start, args.duration, separator.samplerate)
 
-    write_progress(args.progress_file, 28, "Separating stems on Apple GPU…")
-    _origin, stems = separator.separate_tensor(wav)
-    sr = int(separator.samplerate)
+        write_progress(args.progress_file, 28, "Separating stems on Apple GPU…")
+        _origin, stems = separator.separate_tensor(wav)
+        sr = int(separator.samplerate)
 
     write_progress(args.progress_file, 62, "Writing stem files…")
     stem_paths: dict[str, str] = {}
@@ -184,7 +261,7 @@ def run(args: argparse.Namespace) -> dict:
     write_progress(args.progress_file, 100, "Done")
     return {
         "ok": True,
-        "engine": "demucs-mlx",
+        "engine": engine,
         "model": model,
         "samplerate": sr,
         "warning": warning,
@@ -198,7 +275,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Split a mix into stems for REAPER.")
     p.add_argument("--input", required=True, help="Source audio file")
     p.add_argument("--output-dir", required=True, help="Directory for stem WAVs")
-    p.add_argument("--model", default="fast", help="fast, good, 6stem, or a Demucs model name")
+    p.add_argument("--model", default="fast", help="fast, good, best (BS-RoFormer SW), 6stem, or a Demucs model name")
     p.add_argument("--split-drums", action="store_true", help="Also split drums into kit pieces")
     p.add_argument("--start", type=float, default=0.0, help="Start offset in source seconds")
     p.add_argument("--duration", type=float, default=0.0, help="Duration in source seconds (0 = rest of file)")
