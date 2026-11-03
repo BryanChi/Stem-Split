@@ -1,11 +1,11 @@
 # Stem Split
 
-REAPER script that splits the selected audio item into vocals / drums / bass / other using BS-RoFormer SW (default, cleanest) or Demucs-MLX (fast) on Apple Silicon. Optional 6-stem (guitar + piano), drum-kit split, and tempo map from the drums stem.
+REAPER script that splits the selected audio item into vocals / drums / bass / other using BS-RoFormer SW on Apple Silicon (MLX). Optional 6-stem (guitar + piano), drum-kit split, and tempo map from the drums stem.
 
 ## Requirements
 
 - [REAPER](https://www.reaper.fm/)
-- macOS on Apple Silicon (Demucs-MLX)
+- macOS on Apple Silicon (MLX)
 - Python 3.13
 - A local virtualenv next to these files named `.venv-stems`
 
@@ -35,7 +35,7 @@ First run downloads model weights. WAV files work as-is.
 | Path | Role |
 | --- | --- |
 | `Split selected item to stems.lua` | Main action: split selected item(s) onto new tracks |
-| `StemSplit.py` | Demucs-MLX / drum-split sidecar |
+| `StemSplit.py` | BS-RoFormer SW / drum-split sidecar |
 | `Tempo map from drum stem.lua` | Optional: tempo-map the project from the drums stem |
 
 `.venv-stems/` is created locally and is not committed.
