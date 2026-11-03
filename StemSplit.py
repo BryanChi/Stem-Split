@@ -163,7 +163,40 @@ def looks_like_drum_loop(wav, samplerate: int) -> bool:
     return bool(drumish)
 
 
-def split_drums(drums_wav, samplerate: int, out_dir: Path, progress_file: str | None) -> dict[str, str]:
+def nearly_empty(stem, ref, samplerate: int) -> bool:
+    """True when a stem holds next to nothing: quiet overall (RMS < -38 dBFS) and audible in under
+    10% of 0.5 s windows, or 40 dB below `ref` (the mix, or the drums for a kit piece).
+    Fit on real splits: bleed-only crash/toms/ride/hh and vocals on an instrumental fall under it;
+    the quietest real hats/ride/toms (20%+ active) stay well above it."""
+    import numpy as np
+
+    a = np.asarray(stem, dtype=np.float32)
+    b = np.asarray(ref, dtype=np.float32)
+    if a.ndim == 2:
+        a = a.mean(axis=0) if a.shape[0] <= 8 else a.mean(axis=1)
+    if b.ndim == 2:
+        b = b.mean(axis=0) if b.shape[0] <= 8 else b.mean(axis=1)
+    n = min(a.shape[0], b.shape[0])
+    hop = max(256, int(samplerate * 0.5))
+    frames = n // hop
+    if frames < 4:
+        return False
+    a = a[: frames * hop].reshape(frames, hop)
+    b = b[: frames * hop].reshape(frames, hop)
+    ea = float(np.mean(a * a))
+    eb = float(np.mean(b * b)) + 1e-12
+    rms_db = 10.0 * np.log10(ea + 1e-12)
+    rel_db = 10.0 * np.log10(ea / eb + 1e-12)
+    ra = np.sqrt(np.mean(a * a, axis=1))
+    rb = np.sqrt(np.mean(b * b, axis=1))
+    # a window counts when the stem is above -45 dBFS and within 30 dB of the reference there
+    active = (ra > 10 ** (-45 / 20)) & (ra > rb * 10 ** (-30 / 20))
+    frac = float(np.mean(active))
+    return rel_db < -40.0 or (rms_db < -38.0 and frac < 0.10)
+
+
+def split_drums(drums_wav, samplerate: int, out_dir: Path, progress_file: str | None,
+                merge_empty: bool = False, merged: list | None = None) -> dict[str, str]:
     import numpy as np
     from mdxnet_infer import MDX23CInference
 
@@ -183,6 +216,11 @@ def split_drums(drums_wav, samplerate: int, out_dir: Path, progress_file: str | 
         # (samples, 2) -> (channels, time)
         if getattr(piece, "ndim", 1) == 2 and piece.shape[0] != 2 and piece.shape[1] == 2:
             piece = piece.T
+        if merge_empty and nearly_empty(piece, drums_wav, int(samplerate)):
+            # nothing worth a track: it is already in the drums stem
+            if merged is not None:
+                merged.append((name, "drums"))
+            continue
         dest = out_dir / f"{name}.wav"
         save_wav(piece, dest, samplerate)
         paths[name] = str(dest)
@@ -201,6 +239,8 @@ def write_manifest(path: Path, payload: dict) -> None:
         lines.append(f"STEM|{name}|{wav_path}")
     for name, wav_path in (payload.get("drum_stems") or {}).items():
         lines.append(f"DRUM|{name}|{wav_path}")
+    for name, into in payload.get("merged") or []:
+        lines.append(f"MERGED|{name}|{into}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     json_path = path.with_suffix(".json")
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -292,6 +332,7 @@ def run(args: argparse.Namespace) -> dict:
         detect_note = "drum loop" if skip_mix else "full mix"
 
     warning = ""
+    merged: list[tuple[str, str]] = []
     stem_paths: dict[str, str] = {}
     drum_paths: dict[str, str] = {}
     engine = ENGINE
@@ -304,7 +345,7 @@ def run(args: argparse.Namespace) -> dict:
         stem_paths["drums"] = str(drums_dest)
         if args.split_drums:
             try:
-                drum_paths = split_drums(wav, sr, out_dir, args.progress_file)
+                drum_paths = split_drums(wav, sr, out_dir, args.progress_file, args.merge_empty, merged)
             except Exception as exc:
                 warning = f"Drum split failed: {exc}"
         if detect_note == "drum loop" and not warning:
@@ -315,6 +356,13 @@ def run(args: argparse.Namespace) -> dict:
         skipped = [k.strip().lower() for k in (args.skip_stems or "").split(",") if k.strip()]
         if skipped:
             stems = fold_skipped(stems, skipped)
+        if args.merge_empty and "other" in stems:
+            import numpy as np
+            mix_np = np.asarray(wav, dtype=np.float32)
+            empty = [k for k, v in stems.items() if k != "other" and nearly_empty(v, mix_np, sr)]
+            if empty:
+                stems = fold_skipped(stems, empty)
+                merged.extend((k, "other") for k in empty)
 
         write_progress(args.progress_file, 62, "Writing stem files…")
         for name, audio in ordered_stems(stems, count):
@@ -328,7 +376,7 @@ def run(args: argparse.Namespace) -> dict:
                 warning = "No drums stem to split."
             else:
                 try:
-                    drum_paths = split_drums(drums, sr, out_dir, args.progress_file)
+                    drum_paths = split_drums(drums, sr, out_dir, args.progress_file, args.merge_empty, merged)
                 except Exception as exc:
                     warning = f"Drum split failed: {exc}"
 
@@ -343,6 +391,7 @@ def run(args: argparse.Namespace) -> dict:
         "drum_stems": drum_paths,
         "output_dir": str(out_dir),
         "skipped_mix": skip_mix,
+        "merged": [list(m) for m in merged],
     }
 
 
@@ -355,6 +404,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--split-drums", action="store_true", help="Also split drums into kit pieces")
     p.add_argument("--drums-only", action="store_true", help="Skip mix separation; treat the input as drums")
     p.add_argument("--skip-stems", default="", help="Comma list of mix stems to leave out; they are blended into other")
+    p.add_argument("--merge-empty", action="store_true", help="Blend nearly empty stems back (mix stems into other; kit pieces stay in drums)")
     p.add_argument("--auto-skip-mix", action="store_true", help="Skip mix separation when the audio looks like a drum loop")
     p.add_argument("--start", type=float, default=0.0, help="Start offset in source seconds")
     p.add_argument("--duration", type=float, default=0.0, help="Duration in source seconds (0 = rest of file)")

@@ -1,5 +1,5 @@
 -- @description Split selected item to stems (BS-RoFormer SW)
--- @version 1.5
+-- @version 1.6
 -- @author BRYAN
 -- @about
 --   Splits the selected audio item into vocals / drums / bass / other using
@@ -10,6 +10,7 @@
 --   New window in the Monolith look: stems, input (auto / full mix / drum loop), drum kit
 --   split, progress per item, cancel, results with the imported stems. Every stem and kit card
 --   toggles: a mix stem turned off is blended into Other, a kit piece turned off gets no track.
+--   Almost-empty stems (only quiet bleed) are blended back too, and the results show which.
 -- @provides [main] .
 
 local r = reaper
@@ -295,6 +296,7 @@ local function parse_manifest(path)
     warning = "",
     stems = {},
     drum_stems = {},
+    merged = {},
   }
   for line in fh:lines() do
     local kind, a, b = line:match("^([^|]+)|([^|]*)|(.*)$")
@@ -313,6 +315,8 @@ local function parse_manifest(path)
       info.stems[a] = b
     elseif kind == "DRUM" and a and b then
       info.drum_stems[a] = b
+    elseif kind == "MERGED" and a and b then
+      info.merged[#info.merged + 1] = { a, b }
     end
   end
   fh:close()
@@ -419,6 +423,9 @@ local function python_cmd(py, sidecar, job, opts, paths)
   }
   if opts.split_drums then
     parts[#parts + 1] = "--split-drums"
+  end
+  if opts.merge_empty then
+    parts[#parts + 1] = "--merge-empty"
   end
   if opts.skip_stems and opts.skip_stems ~= "" then
     parts[#parts + 1] = "--skip-stems"
@@ -621,6 +628,7 @@ local function load_opts()
     split_drums = yn(ext_get("SPLIT_DRUMS", "n"), false),
     mute_original = yn(ext_get("MUTE_ORIGINAL", "y"), true),
     tempo_map = yn(ext_get("TEMPO_MAP", "n"), false),
+    merge_empty = yn(ext_get("MERGE_EMPTY", "y"), true),
     input = input,
     off_stems = keyset(ext_get("OFF_STEMS", "")),
     off_kit = keyset(ext_get("OFF_KIT", "")),
@@ -632,6 +640,7 @@ local function save_opts(o)
   ext_set("SPLIT_DRUMS", o.split_drums and "y" or "n")
   ext_set("MUTE_ORIGINAL", o.mute_original and "y" or "n")
   ext_set("TEMPO_MAP", o.tempo_map and "y" or "n")
+  ext_set("MERGE_EMPTY", o.merge_empty and "y" or "n")
   ext_set("DRUM_LOOP", o.input)
   ext_set("OFF_STEMS", keylist(o.off_stems, MIX_ORDER))
   ext_set("OFF_KIT", keylist(o.off_kit, DRUM_ORDER))
@@ -1012,6 +1021,7 @@ local function opts_for_run()
     split_drums = o.split_drums,
     mute_original = o.mute_original,
     tempo_map = o.tempo_map,
+    merge_empty = o.merge_empty,
     input = o.input,
     skip_stems = (o.input ~= "drums") and keylist(o.off_stems, MIX_ORDER) or "",
     off_kit = o.off_kit,
@@ -1112,6 +1122,7 @@ local function import_job(job, code)
   job.stems = ordered_present(MIX_ORDER, info.stems)
   job.drum_stems = ordered_present(DRUM_ORDER, info.drum_stems)
   job.skipped_mix = info.engine == "drums-only"
+  job.merged = info.merged
   if info.warning and info.warning ~= "" then
     job.notes[#job.notes + 1] = info.warning
   end
@@ -1303,6 +1314,8 @@ local function draw_setup()
   if ck and not drums_only then
     o.off_stems[ck] = (not o.off_stems[ck]) or nil
   end
+  gap(4)
+  o.merge_empty = toggle("##merge", "Blend almost-empty stems back", o.merge_empty, W)
   gap(16)
 
   -- DRUMS
@@ -1369,8 +1382,32 @@ local function draw_job_detail(job)
     for _, k in ipairs(job.drum_stems or {}) do
       if not (JOB.opts.off_kit and JOB.opts.off_kit[k]) then keys[#keys + 1] = k end
     end
+    -- almost-empty stems that were blended back: struck through after the imported ones
+    local merged_set, into_other, into_drums = {}, {}, {}
+    for _, m in ipairs(job.merged or {}) do
+      local k, into = m[1], m[2]
+      if not merged_set[k] and not (JOB.opts.off_kit and JOB.opts.off_kit[k]) then
+        merged_set[k] = true
+        keys[#keys + 1] = k
+        local list = (into == "drums") and into_drums or into_other
+        list[#list + 1] = STEM_LABEL[k] or k
+      end
+    end
     if #keys > 0 then
-      chips(keys, nil, math.min(6, math.max(4, #keys)))
+      chips(keys, nil, math.min(6, math.max(4, #keys)), nil, nil, nil, merged_set)
+    end
+    local merge_notes = {}
+    if #into_other > 0 then
+      merge_notes[#merge_notes + 1] = "Almost empty, blended into Other: " .. table.concat(into_other, ", ")
+    end
+    if #into_drums > 0 then
+      merge_notes[#merge_notes + 1] = "Almost empty, left in Drums: " .. table.concat(into_drums, ", ")
+    end
+    for _, note in ipairs(merge_notes) do
+      gap(4)
+      local nx, ny = im.GetCursorScreenPos(ctx)
+      txt(dl, nx + 12, ny, P.ink2, note, 10, W - 12)
+      im.Dummy(ctx, W, 12)
     end
     for _, note in ipairs(job.notes or {}) do
       gap(4)
