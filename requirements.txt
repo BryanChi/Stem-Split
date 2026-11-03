@@ -1,4 +1,4 @@
-demucs-mlx[convert]
+demucs-mlx[convert]>=1.6
 mlx-audio-separator
 mdxnet-infer
 soundfile

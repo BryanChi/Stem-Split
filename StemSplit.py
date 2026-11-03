@@ -184,13 +184,17 @@ def separate_roformer(args: argparse.Namespace, model: str, out_dir: Path):
     mix = np.asarray(wav, dtype=np.float32)
     if mix.shape[0] == 1:
         mix = np.concatenate([mix, mix], axis=0)
+    # The separator peak-limits its input and each stem to normalization_threshold on its own.
+    # Feed it the mix at <= -6 dBFS and undo that gain after, so stems keep their level and sum to the mix.
+    peak = float(np.max(np.abs(mix))) if mix.size else 0.0
+    gain = min(1.0, 0.5 / peak) if peak > 1e-9 else 1.0
 
     work = Path(tempfile.mkdtemp(prefix="roformer_", dir=str(out_dir)))
     try:
         src = work / "mix.wav"
-        sf.write(str(src), mix.T, sr, subtype="FLOAT")
+        sf.write(str(src), (mix * gain).T, sr, subtype="FLOAT")
         write_progress(args.progress_file, 12, "Loading BS-RoFormer SW (first run downloads weights)…")
-        separator = Separator(output_dir=str(work), output_format="WAV")
+        separator = Separator(output_dir=str(work), output_format="WAV", normalization_threshold=1.0)
         separator.load_model(model_filename=ROFORMER_CKPT)
         write_progress(args.progress_file, 28, "Separating stems on Apple GPU (BS-RoFormer SW)…")
         outputs = separator.separate(str(src))
@@ -200,7 +204,7 @@ def separate_roformer(args: argparse.Namespace, model: str, out_dir: Path):
             if not out_path.is_absolute():
                 out_path = work / out_path
             data, _ = sf.read(str(out_path), dtype="float32", always_2d=True)
-            stems[stem_key(str(out_path))] = data.T
+            stems[stem_key(str(out_path))] = data.T / gain
     finally:
         shutil.rmtree(work, ignore_errors=True)
     if not stems:
