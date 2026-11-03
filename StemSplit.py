@@ -260,6 +260,19 @@ def separate_roformer(wav, sr: int, count: int, out_dir: Path, progress_file: st
     return stems, sr
 
 
+def fold_skipped(stems: dict, skipped: list[str]) -> dict:
+    """Blend the stems the user turned off into "other" (dropped when "other" is off too)."""
+    keep = {k: v for k, v in stems.items() if k not in skipped}
+    gone = [v for k, v in stems.items() if k in skipped and k != "other"]
+    if "other" in keep and gone:
+        n = min(a.shape[-1] for a in gone + [keep["other"]])
+        other = keep["other"][..., :n]
+        for a in gone:
+            other = other + a[..., :n]
+        keep["other"] = other
+    return keep
+
+
 def run(args: argparse.Namespace) -> dict:
     count = resolve_stems(args.stems or args.model)
     model = f"{ENGINE}-{count}stem"
@@ -298,6 +311,10 @@ def run(args: argparse.Namespace) -> dict:
             warning = "Skipped mix split (already a drum loop)."
     else:
         stems, sr = separate_roformer(wav, sr, count, out_dir, args.progress_file)
+        drums_for_kit = stems.get("drums")
+        skipped = [k.strip().lower() for k in (args.skip_stems or "").split(",") if k.strip()]
+        if skipped:
+            stems = fold_skipped(stems, skipped)
 
         write_progress(args.progress_file, 62, "Writing stem files…")
         for name, audio in ordered_stems(stems, count):
@@ -306,7 +323,7 @@ def run(args: argparse.Namespace) -> dict:
             stem_paths[name] = str(dest)
 
         if args.split_drums:
-            drums = stems.get("drums")
+            drums = drums_for_kit
             if drums is None:
                 warning = "No drums stem to split."
             else:
@@ -337,6 +354,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--model", default="", help="Deprecated: old model name, mapped to --stems")
     p.add_argument("--split-drums", action="store_true", help="Also split drums into kit pieces")
     p.add_argument("--drums-only", action="store_true", help="Skip mix separation; treat the input as drums")
+    p.add_argument("--skip-stems", default="", help="Comma list of mix stems to leave out; they are blended into other")
     p.add_argument("--auto-skip-mix", action="store_true", help="Skip mix separation when the audio looks like a drum loop")
     p.add_argument("--start", type=float, default=0.0, help="Start offset in source seconds")
     p.add_argument("--duration", type=float, default=0.0, help="Duration in source seconds (0 = rest of file)")

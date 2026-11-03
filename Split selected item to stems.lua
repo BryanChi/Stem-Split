@@ -1,5 +1,5 @@
 -- @description Split selected item to stems (BS-RoFormer SW)
--- @version 1.4
+-- @version 1.5
 -- @author BRYAN
 -- @about
 --   Splits the selected audio item into vocals / drums / bass / other using
@@ -8,7 +8,8 @@
 --   next to this script (or in another Scripts folder). Needs ReaImGui.
 -- @changelog
 --   New window in the Monolith look: stems, input (auto / full mix / drum loop), drum kit
---   split, progress per item, cancel, results with the imported stems.
+--   split, progress per item, cancel, results with the imported stems. Every stem and kit card
+--   toggles: a mix stem turned off is blended into Other, a kit piece turned off gets no track.
 -- @provides [main] .
 
 local r = reaper
@@ -233,12 +234,20 @@ local function create_stem_tracks(src_track, folder_name, mix_names, drum_names)
     return tr
   end
 
+  local kit_added = false
   for _, key in ipairs(mix_names) do
     add_child(key, STEM_LABEL[key] or key)
     if key == "drums" then
       for _, dkey in ipairs(drum_names) do
         add_child(dkey, STEM_LABEL[dkey] or dkey)
       end
+      kit_added = true
+    end
+  end
+  if not kit_added then
+    -- the drums stem was turned off (blended into Other): the kit pieces still get their tracks
+    for _, dkey in ipairs(drum_names) do
+      add_child(dkey, STEM_LABEL[dkey] or dkey)
     end
   end
 
@@ -411,6 +420,10 @@ local function python_cmd(py, sidecar, job, opts, paths)
   if opts.split_drums then
     parts[#parts + 1] = "--split-drums"
   end
+  if opts.skip_stems and opts.skip_stems ~= "" then
+    parts[#parts + 1] = "--skip-stems"
+    parts[#parts + 1] = shell_quote(opts.skip_stems)
+  end
   if opts.input == "drums" then
     parts[#parts + 1] = "--drums-only"
   elseif opts.input == "auto" then
@@ -424,8 +437,13 @@ local function import_result(job, opts, info)
     return false, "Original item is gone. Stems are on disk."
   end
   local mix_names = ordered_present(MIX_ORDER, info.stems)
-  local drum_names = ordered_present(DRUM_ORDER, info.drum_stems)
-  if #mix_names < 1 then
+  local drum_names = {}
+  for _, k in ipairs(ordered_present(DRUM_ORDER, info.drum_stems)) do
+    if not (opts.off_kit and opts.off_kit[k]) then
+      drum_names[#drum_names + 1] = k
+    end
+  end
+  if #mix_names < 1 and #drum_names < 1 then
     return false, "No stem files were written."
   end
 
@@ -579,6 +597,20 @@ end
 
 local INPUT_KEYS = { "auto", "mix", "drums" }
 
+local function keyset(csv)
+  local t = {}
+  for k in tostring(csv or ""):gmatch("[^,%s]+") do t[k] = true end
+  return t
+end
+
+local function keylist(set, order)
+  local out = {}
+  for _, k in ipairs(order) do
+    if set and set[k] then out[#out + 1] = k end
+  end
+  return table.concat(out, ",")
+end
+
 local function load_opts()
   local input = ext_get("DRUM_LOOP", "auto")
   if input ~= "auto" and input ~= "mix" and input ~= "drums" then
@@ -590,6 +622,8 @@ local function load_opts()
     mute_original = yn(ext_get("MUTE_ORIGINAL", "y"), true),
     tempo_map = yn(ext_get("TEMPO_MAP", "n"), false),
     input = input,
+    off_stems = keyset(ext_get("OFF_STEMS", "")),
+    off_kit = keyset(ext_get("OFF_KIT", "")),
   }
 end
 
@@ -599,6 +633,8 @@ local function save_opts(o)
   ext_set("MUTE_ORIGINAL", o.mute_original and "y" or "n")
   ext_set("TEMPO_MAP", o.tempo_map and "y" or "n")
   ext_set("DRUM_LOOP", o.input)
+  ext_set("OFF_STEMS", keylist(o.off_stems, MIX_ORDER))
+  ext_set("OFF_KIT", keylist(o.off_kit, DRUM_ORDER))
 end
 
 ---------------------------------------------------------------------------------------------
@@ -819,7 +855,8 @@ local function toggle(id, label, on, w)
 end
 
 --- colour-striped stem names, n per row; lit = set of keys drawn bright (nil = all)
-local function chips(keys, lit, per_row, x0, w0)
+--- id + off (set of keys the user turned off): the lit chips are clickable; returns the clicked key
+local function chips(keys, lit, per_row, x0, w0, id, off)
   local dl = im.GetWindowDrawList(ctx)
   local x, y = im.GetCursorScreenPos(ctx)
   x = x0 or x
@@ -828,21 +865,36 @@ local function chips(keys, lit, per_row, x0, w0)
   local cw = (w - (per_row - 1) * 4) / per_row
   local h = 20
   local rows = 0
+  local clicked = nil
   for i, key in ipairs(keys) do
     local col = (i - 1) % per_row
     local row = (i - 1) // per_row
     rows = row + 1
     local L = math.floor(x + col * (cw + 4))
     local T = y + row * (h + 4)
-    local on = (lit == nil) or lit[key]
+    local avail = (lit == nil) or lit[key]
+    local is_off = avail and off and off[key]
+    local on = avail and not is_off
+    local hov = false
+    if id and avail then
+      im.SetCursorScreenPos(ctx, L, T)
+      if im.InvisibleButton(ctx, id .. key, cw, h) then
+        clicked = key
+      end
+      hov = im.IsItemHovered(ctx)
+    end
     local rgb = STEM_RGB[key] or { 160, 160, 160 }
-    im.DrawList_AddRectFilled(dl, L, T, L + cw, T + h, on and P.chip or 0x070707FF)
-    im.DrawList_AddRect(dl, L, T, L + cw, T + h, on and P.line or 0xFFFFFF0C, 0, 0, 1)
+    im.DrawList_AddRectFilled(dl, L, T, L + cw, T + h, on and (hov and 0x19191AFF or P.chip) or (hov and 0x111112FF or 0x070707FF))
+    im.DrawList_AddRect(dl, L, T, L + cw, T + h, hov and P.line2 or (on and P.line or 0xFFFFFF0C), 0, 0, 1)
     im.DrawList_AddRectFilled(dl, L, T, L + 3, T + h, rgb_u32(rgb, on and 1 or 0.22))
-    caps(dl, L + 10, T + 5, on and P.ink or P.ink3, STEM_LABEL[key] or key, 9, false, 1.1)
+    local x2 = caps(dl, L + 10, T + 5, on and P.ink or (is_off and hov and P.ink2 or P.ink3), STEM_LABEL[key] or key, 9, false, 1.1)
+    if is_off then
+      im.DrawList_AddLine(dl, L + 9, T + h / 2, x2 + 1, T + h / 2, P.ink3, 1)
+    end
   end
   im.SetCursorScreenPos(ctx, x0 or x, y)
   im.Dummy(ctx, w, rows * h + (rows - 1) * 4)
+  return clicked
 end
 
 --- a square button; kind = "primary" | "plain" | "danger"; returns true on click
@@ -961,6 +1013,8 @@ local function opts_for_run()
     mute_original = o.mute_original,
     tempo_map = o.tempo_map,
     input = o.input,
+    skip_stems = (o.input ~= "drums") and keylist(o.off_stems, MIX_ORDER) or "",
+    off_kit = o.off_kit,
   }
 end
 
@@ -1237,6 +1291,7 @@ local function draw_setup()
   local lit = {}
   if drums_only then
     lit.drums = true
+    o.off_stems.drums = nil
   else
     for _, k in ipairs({ "vocals", "drums", "bass", "other" }) do lit[k] = true end
     if o.stems == "6" then
@@ -1244,7 +1299,10 @@ local function draw_setup()
       lit.piano = true
     end
   end
-  chips(MIX_ORDER, lit, 6)
+  local ck = chips(MIX_ORDER, lit, 6, nil, nil, "##stem_", (not drums_only) and o.off_stems or nil)
+  if ck and not drums_only then
+    o.off_stems[ck] = (not o.off_stems[ck]) or nil
+  end
   gap(16)
 
   -- DRUMS
@@ -1255,7 +1313,10 @@ local function draw_setup()
   if o.split_drums then
     for _, k in ipairs(DRUM_ORDER) do kit_lit[k] = true end
   end
-  chips(DRUM_ORDER, kit_lit, 6)
+  ck = chips(DRUM_ORDER, kit_lit, 6, nil, nil, "##kitp_", o.off_kit)
+  if ck then
+    o.off_kit[ck] = (not o.off_kit[ck]) or nil
+  end
   gap(16)
 
   -- AFTER
@@ -1305,7 +1366,9 @@ local function draw_job_detail(job)
     gap(4)
     local keys = {}
     for _, k in ipairs(job.stems or {}) do keys[#keys + 1] = k end
-    for _, k in ipairs(job.drum_stems or {}) do keys[#keys + 1] = k end
+    for _, k in ipairs(job.drum_stems or {}) do
+      if not (JOB.opts.off_kit and JOB.opts.off_kit[k]) then keys[#keys + 1] = k end
+    end
     if #keys > 0 then
       chips(keys, nil, math.min(6, math.max(4, #keys)))
     end
