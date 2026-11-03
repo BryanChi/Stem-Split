@@ -1,9 +1,9 @@
--- @description Split selected item to stems (Demucs-MLX)
--- @version 1.1
+-- @description Split selected item to stems (BS-RoFormer SW)
+-- @version 1.3
 -- @author BRYAN
 -- @about
 --   Splits the selected audio item into vocals / drums / bass / other using
---   Demucs-MLX on Apple Silicon. Optional 6-stem (guitar + piano), drum
+--   BS-RoFormer SW on Apple Silicon (MLX). Optional 6-stem (guitar + piano), drum
 --   kit split, and tempo map from the drums stem. Requires .venv-stems
 --   next to this script.
 -- @provides [main] .
@@ -381,15 +381,15 @@ local function collect_jobs()
 end
 
 local function ask_options()
-  local model = ext_get("MODEL", "fast")
+  local stems = ext_get("STEMS", "4")
   local drums = ext_get("SPLIT_DRUMS", "n")
   local mute = ext_get("MUTE_ORIGINAL", "y")
   local tempo = ext_get("TEMPO_MAP", "n")
   local ok, csv = r.GetUserInputs(
     "Split to stems",
     4,
-    "Model (fast / good / 6stem),Split drums into kit (y/n),Mute original item (y/n),Tempo map from drums (y/n)",
-    table.concat({model, drums, mute, tempo}, ",")
+    "Stems (4 / 6 adds guitar + piano),Split drums into kit (y/n),Mute original item (y/n),Tempo map from drums (y/n)",
+    table.concat({stems, drums, mute, tempo}, ",")
   )
   if not ok then
     return nil
@@ -402,16 +402,13 @@ local function ask_options()
   if not a then
     return nil
   end
-  a = a:gsub("^%s+", ""):gsub("%s+$", ""):lower()
-  if a ~= "fast" and a ~= "good" and a ~= "6stem" and a ~= "htdemucs" and a ~= "htdemucs_ft" and a ~= "htdemucs_6s" then
-    a = "fast"
-  end
-  ext_set("MODEL", a)
+  a = a:match("6") and "6" or "4"
+  ext_set("STEMS", a)
   ext_set("SPLIT_DRUMS", yn(b, false) and "y" or "n")
   ext_set("MUTE_ORIGINAL", yn(c, true) and "y" or "n")
   ext_set("TEMPO_MAP", yn(d, false) and "y" or "n")
   return {
-    model = a,
+    stems = a,
     split_drums = yn(b, false),
     mute_original = yn(c, true),
     tempo_map = yn(d, false),
@@ -443,7 +440,7 @@ local function python_cmd(py, sidecar, job, opts, paths)
     shell_quote(sidecar),
     "--input", shell_quote(job.path),
     "--output-dir", shell_quote(paths.out_dir),
-    "--model", shell_quote(opts.model),
+    "--stems", opts.stems,
     "--start", string.format("%.6f", job.startoffs or 0),
     "--duration", string.format("%.6f", duration or 0),
     "--progress-file", shell_quote(paths.progress),
@@ -699,7 +696,7 @@ local function main()
     return
   end
   if r.GetOS():match("Win") then
-    r.MB("This script currently uses Demucs-MLX and is Mac / Apple Silicon only.", "Split to stems", 0)
+    r.MB("This script uses BS-RoFormer SW on MLX and is Mac / Apple Silicon only.", "Split to stems", 0)
     return
   end
 
@@ -711,7 +708,7 @@ local function main()
       "Python environment not found:\n" .. py .. "\n\n"
         .. "Create it with:\n"
         .. "  python3.13 -m venv .venv-stems\n"
-        .. "  .venv-stems/bin/pip install 'demucs-mlx[convert]' mdxnet-infer soundfile",
+        .. "  .venv-stems/bin/pip install mlx-audio-separator 'torch>=2.6' mdxnet-infer soundfile",
       "Split to stems",
       0
     )

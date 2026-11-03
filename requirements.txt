@@ -1,3 +1,4 @@
-demucs-mlx[convert]
+mlx-audio-separator
+torch>=2.6
 mdxnet-infer
 soundfile
