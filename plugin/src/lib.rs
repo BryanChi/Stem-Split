@@ -23,6 +23,18 @@ use shared::{CapState, SessionInfo, Shared};
 pub const STEM_SLOTS: [&str; 6] = ["vocals", "drums", "bass", "guitar", "piano", "other"];
 pub const STEM_LABELS: [&str; 6] = ["Vocals", "Drums", "Bass", "Guitar", "Piano", "Other"];
 
+/// Set by the standalone app before it starts: there is no DAW transport, so the plugin runs its
+/// own (Play / Pause / click to seek), and nothing is passed through from the input.
+static APP_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_app_mode(on: bool) {
+    APP_MODE.store(on, Ordering::Relaxed);
+}
+
+pub fn app_mode() -> bool {
+    APP_MODE.load(Ordering::Relaxed)
+}
+
 pub fn slot_of(name: &str) -> Option<usize> {
     STEM_SLOTS.iter().position(|s| *s == name)
 }
@@ -196,7 +208,9 @@ impl Plugin for StemSplit {
     ) -> ProcessStatus {
         let shared = &*self.shared;
         let transport = context.transport();
-        let playing = transport.playing;
+        let app = app_mode();
+        // The standalone's "transport" always runs; the app plays from its own position instead.
+        let playing = transport.playing && !app;
         let host_pos = transport.pos_samples().unwrap_or(0);
         let n = buffer.samples();
         shared.host_playing.store(playing, Ordering::Relaxed);
@@ -243,12 +257,24 @@ impl Plugin for StemSplit {
         let shared = &*self.shared;
         let Some(set) = self.stems.as_deref() else {
             shared.play_pos.store(-1, Ordering::Relaxed);
-            self.ensure_stereo(buffer);
+            if app {
+                for ch in buffer.as_slice() {
+                    ch.fill(0.0);
+                }
+            } else {
+                self.ensure_stereo(buffer);
+            }
             return ProcessStatus::Normal;
         };
         if shared.bypass.load(Ordering::Relaxed) || shared.cap_state() != CapState::Idle {
             shared.play_pos.store(-1, Ordering::Relaxed);
-            self.ensure_stereo(buffer);
+            if app {
+                for ch in buffer.as_slice() {
+                    ch.fill(0.0);
+                }
+            } else {
+                self.ensure_stereo(buffer);
+            }
             return ProcessStatus::Normal;
         }
 
