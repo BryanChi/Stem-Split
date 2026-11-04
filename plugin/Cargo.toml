@@ -1,0 +1,51 @@
+[package]
+name = "stem_split_plugin"
+version = "0.1.0"
+edition = "2021"
+description = "Stem Split as a CLAP/VST3 plugin: separate audio into stems, play them back with per-stem volume, drag the stem files into the DAW"
+license = "GPL-3.0-or-later"
+
+[workspace]
+members = ["xtask"]
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", rev = "de421011f41a6d10fc8c7a6084e4f4dee0143683" }
+nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug.git", rev = "de421011f41a6d10fc8c7a6084e4f4dee0143683" }
+hound = "3.5"
+parking_lot = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rubato = "0.16"
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+rfd = "0.15"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSString", "NSURL", "NSGeometry", "NSObject"] }
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = "none"
+
+[patch."https://github.com/BillyDM/egui-baseview.git"]
+egui-baseview = { path = "vendor/egui-baseview" }
+
+[features]
+# Standalone app for testing without a DAW: cargo run --features standalone -- --backend dummy
+standalone = ["nih_plug/standalone"]
+# Debug builds: abort when the audio thread allocates
+assert_allocs = ["nih_plug/assert_process_allocs"]
+
+[[bin]]
+name = "stem_split_standalone"
+path = "src/main.rs"
+required-features = ["standalone"]

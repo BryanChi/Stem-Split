@@ -4,6 +4,12 @@ REAPER script that splits the selected audio item into vocals / drums / bass / o
 
 The action opens one window for everything: the selected items, the input (Auto detects drum loops, Full mix, Drum loop), 4 or 6 stems, the drum-kit split, mute original and tempo map, then a progress bar per item with Cancel, and the stems each item got.
 
+## Plugin (any DAW)
+
+`plugin/` builds the same separator as a CLAP / VST3 plugin: drop a file or capture the track,
+mix the stems inside the plugin with a fader per stem, and drag the stem files into the DAW.
+See [plugin/README.md](plugin/README.md).
+
 ## Requirements
 
 - [REAPER](https://www.reaper.fm/) with [ReaImGui](https://github.com/cfillion/reaimgui) (ReaPack)
