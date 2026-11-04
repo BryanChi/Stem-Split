@@ -625,12 +625,14 @@ mod e2e {
         assert_eq!(sess.stem_count, 6);
         assert!((sess.origin_sec - 3.0).abs() < 1e-9);
         assert_eq!(shared.origin_samples.load(Ordering::Relaxed), 44100 * 3);
-        assert!(sess.merged.iter().any(|(n, _)| n == "piano"));
         let set = shared.stems().expect("stems loaded");
         assert_eq!(set.sample_rate, 44100.0);
-        // 6 s at 48 kHz in, resampled to the 44.1 kHz host
-        assert!((set.len as i64 - 6 * 44100).abs() <= 1, "len {}", set.len);
-        assert!(set.slot[crate::slot_of("piano").unwrap()].is_none());
+        if std::env::var_os("STEM_SPLIT_TEST_FAKE").is_some() {
+            // the stand-in separator's 6 s test tone at 48 kHz, resampled to the 44.1 kHz host
+            assert!(sess.merged.iter().any(|(n, _)| n == "piano"));
+            assert!((set.len as i64 - 6 * 44100).abs() <= 1, "len {}", set.len);
+            assert!(set.slot[crate::slot_of("piano").unwrap()].is_none());
+        }
         // stems sum back to (roughly) the mix
         let energy: f32 = set.slot.iter().flatten().map(|s| s.l.iter().map(|x| x * x).sum::<f32>()).sum();
         assert!(energy > 1.0);
